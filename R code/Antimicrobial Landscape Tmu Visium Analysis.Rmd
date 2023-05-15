@@ -1,0 +1,1743 @@
+---
+title: "Antimicrobial Landscape Visium Analysis"
+author: "Gabe Barrón"
+date: "2/14/2022"
+output: html_document
+---
+
+
+<style type="text/css">
+div.main-container {
+  max-width: 1800px;
+  margin-left: 20px;
+  margin-right: 20px;
+}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Load libraries
+***
+
+```{r load_libs, warning=FALSE, message=FALSE}
+
+library(STutility)
+library(Seurat)
+library(ggplot2)
+library(dplyr)
+library(magrittr)
+library(zeallot)
+
+```
+
+
+```{r prepare_data}
+
+infoTable <- read.csv("infotable.csv")
+
+```
+
+
+```{r create_seurat}
+
+
+se <- InputFromTable(infotable = infoTable)
+
+```
+
+## Filtering
+***
+
+
+```{r filter_data}
+library(readr)
+
+urlfile <- "https://raw.githubusercontent.com/ludvigla/healing_intestine_analysis/main/annotation/mm10_genes.tsv"
+
+ensids <- read_table(url(urlfile))
+
+ensids <- read.table("../annotation/mm10_genes.tsv", header = TRUE, stringsAsFactors = FALSE)
+rownames(ensids) <- ensids$gene_name
+
+gene_attr <- data.frame(gene = rownames(se), biotype = ensids[rownames(se), ]$gene_biotype, count = Matrix::rowSums(se@assays$RNA@counts))
+gene_attr.summarized <- gene_attr %>% group_by(biotype) %>%
+  summarize(count = sum(count)) %>%
+  ungroup() %>%
+  mutate(count = count/sum(count))
+
+p <- ggplot(gene_attr.summarized, aes(x = "", y = count, fill = biotype)) +
+  geom_bar(width = 1, stat = "identity") +
+  coord_polar("y", start = 0) +
+  theme_minimal() +
+  scale_y_continuous(labels = scales::percent) +
+  labs(x = "", y = "")
+p
+```
+
+```{r filter}
+
+## Define what biotypes to keep
+bio.keep <- c("protein_coding", "TR_V_gene", "TR_D_gene", "TR_J_gene", "TR_C_gene", "IG_LV_gene", "IG_V_gene", "IG_J_gene", "IG_C_gene", "IG_D_gene")
+genes.keep <- intersect(rownames(se), subset(ensids, gene_biotype %in% bio.keep)$gene_name)
+#
+## Define what genes to remove
+genes.remove <- grep(pattern = "^mt-", x = rownames(se), value = TRUE)
+#
+## Define what genes to keep
+genes.keep <- setdiff(genes.keep, genes.remove)
+#
+## Filter data
+se.manual <- se.manual[genes.keep, ]
+se$nFeature_RNA <- Matrix::colSums(se@assays$RNA@counts > 0)
+se$nCounts_RNA <- Matrix::colSums(se@assays$RNA@counts)
+
+```
+
+
+```{r plot_features, fig.width=7, fig.height=7}
+
+ST.FeaturePlot(se, c("nFeature_RNA", "Trpm5"), ncol = 4, grid.ncol = 1, palette = "Spectral")
+
+```
+
+
+At this point, I annotated the tissue with the corresponding identities: (1) Epi/LP, (2) Muscle and (3) Patch
+```{r loadimages}
+
+se <- LoadImages(se, time.resolve = FALSE, xdim = 1e3)
+
+se.tmu <- ManualAnnotation(se)
+
+se.manual <- se.manual[genes.keep, ]
+se.manual$nFeature_RNA <- Matrix::colSums(se.manual@assays$RNA@counts > 0)
+se.manual$nCounts_RNA <- Matrix::colSums(se.manual@assays$RNA@counts)
+
+Idents(se.tmu) <- "labels"
+se.unroll <- SubsetSTData(se.tmu, idents = c("Unroll"))
+
+unroll.tmu <- se.unroll@assays$SCT@data@Dimnames
+
+unroll.tmu
+
+unroll.tmu.id <- do.call(rbind.data.frame, unroll.tmu[2])
+
+unroll.tmu.id <- as.data.frame(t(unroll.tmu.id))
+
+colnames(unroll.tmu.id) <- c("barcode")
+
+
+factor(se.tmu@meta.data$labels)
+
+```
+
+## Normalization
+***
+
+
+```{r analysis_wf, eval=FALSE, include=TRUE}
+
+se <- se %>% SCTransform(return.only.var.genes = FALSE, variable.features.n = NULL, variable.features.rv.th = 1.1)
+
+```
+
+
+```{r plot_images, fig.width=12, fig.height=6, out.width="100%"}
+
+ImagePlot(se.manual, method = "raster", type = "raw")
+
+se.manual <- MaskImages(object = se.manual)
+
+tiff("H&E.tiff", height = 1, width = 3, units = "in", res = 1200)
+ImagePlot(se.manual, method = "raster", type = "masked", fix.axes = T)
+dev.off()
+
+Idents(se.manual) <- "labels"
+se.epi <- SubsetSTData(se.manual, idents = c("Epi/LP"))
+
+se.patch <- SubsetSTData(se.manual, idents = c("PP"))
+
+```
+
+
+```{r ftr_overlay, fig.width=12.5, fig.height=6}
+
+FeatureOverlay(se, sampleids = 1:2, features = "Trpm5", ncols = 2, palette = "Spectral", type = "masked")
+
+se <- LoadImages(se, time.resolve = FALSE, verbose = TRUE)
+
+ImagePlot(se, method = "raster", type = "raw")
+
+FeatureOverlay(se.manual, 
+               sampleids = 1:2,
+               features = se.manual$labels, 
+               pt.size = 1.5,
+               cols = c("lightgray", "mistyrose", "red", "dark red", "black"), 
+               type = "raw")
+
+```
+
+## Dimensionality reduction
+***
+
+
+```{r nmf, eval=FALSE}
+
+se <- RunNMF(se, nfactors = 20)
+
+se.epi <- RunNMF(se.epi, nfactors = 20)
+
+se.patch <- RunNMF(se.patch, nfactors = 20)
+
+```
+
+
+
+```{r NMF_plots, fig.width=14, fig.height=36}
+
+ST.DimPlot(se, dims = 1:20, ncol = 2, reduction = "NMF", grid.ncol = 2, cols = viridis::magma(n = 9) %>% rev(), center.zero = F, show.sb = FALSE)
+
+```
+
+
+
+```{r Gaussian Smoothing }
+
+ifthenelse <- function(t, y, n) {if(t) {y} else {n} }
+
+smth.gaussian <- function (
+  x,
+  windowLength = 10,
+  alpha = 0.1,
+  tails = TRUE
+){
+
+  # Check Numeric Arguments
+  if(!is.numeric(x) | !is.numeric(alpha)){stop("argument 'x' and 'alpha' must be numeric", call. = FALSE)}
+
+  # Hidden Gaussian Window Function
+  makeWindow  = function(w, a){
+    hw  = abs(w/2.0) #halfwidth
+    e   = exp(1)     #eulers number
+    a   = abs(a)     #alpha
+    ret = sapply(c(0:(w - 1)), function(x){
+      n = x - as.integer(hw)
+      k = -0.5*(a*n/hw)^2
+      e^k
+    })
+    ret
+  }
+
+  w = makeWindow(windowLength, alpha[1])
+
+  sizeW = length(w)
+  sizeD = length(x)
+
+  w = w/sum(w)
+
+  hkwL = as.integer(sizeW/2)
+  hkwR = sizeW - hkwL
+
+  ret  = sapply(c(1:sizeD),function(i){
+    ix.d = c((i - hkwL):(i + hkwR - 1))
+    ix.w = which(ix.d %in% 1:sizeD)
+    ix.d = ix.d[ix.w]
+    W.nm = ifthenelse(length(ix.w) != sizeW, w[ix.w]/sum(w[ix.w]), w)
+    D.nm = x[ix.d]
+    as.numeric(D.nm %*% W.nm)
+  })
+  if(!tails){ret[c(1:hkwL, (sizeD - hkwR + 1):sizeD)] = NA}
+  return(ret)
+}
+
+
+finite.differences <- function(x, y) {
+  if (length(x) != length(y)) {
+    stop('x and y vectors must have equal length')
+  }
+
+  n <- length(x)
+
+  # Initialize a vector of length n to enter the derivative approximations
+  fdx <- vector(length = n)
+
+  # Iterate through the values using the forward differencing method
+  for (i in 2:n) {
+    fdx[i-1] <- (y[i-1] - y[i]) / (x[i-1] - x[i])
+  }
+
+  # For the last value, since we are unable to perform the forward differencing method
+  # as only the first n values are known, we use the backward differencing approach
+  # instead. Note this will essentially give the same value as the last iteration
+  # in the forward differencing method, but it is used as an approximation as we
+  # don't have any more information
+  fdx[n] <- (y[n] - y[n - 1]) / (x[n] - x[n - 1])
+
+  return(fdx)
+}
+
+```
+
+
+
+```{r feature extraction}
+source("../scripts/gaussian_smoothing.R")
+library(inflection)
+
+# inflexion point selection
+top.genes <- lapply(1:20, function(i) {
+  vals <- se.patch@reductions$NMF@feature.loadings[, i]
+  gg <- data.frame(x = 1:length(vals), vals = sort(vals, decreasing = T))
+  gg$gene <- rownames(gg)
+  gg <- subset(gg, vals > 0)
+  gg$logvals <- log(gg$vals)
+  gg$smooth_logvals <- smth.gaussian(x = gg$logvals, windowLength = 10)
+  ggs <- gg[1:500, ]
+  knee <- uik(x = ggs$x, y = ggs$smooth_logvals)
+  ggs[1:knee, ]$gene
+})
+
+# Load gprofiler2
+library(gprofiler2)
+
+pathways <- lapply(seq_along(top.genes), function(i) {
+  gset <- top.genes[[i]]
+  df <- gost(query = gset, organism = "mmusculus", sources = "GO:BP")$result
+  if (is.null(df)) return(NULL)
+  df$factor <- paste0("factor_", i)
+  return(df)
+})
+pathways <- do.call(rbind, pathways)
+pathways$GeneRatio <- pathways$intersection_size/pathways$query_size
+pathways.summarized <- pathways %>% 
+  group_by(factor) %>%
+  top_n(n = 20, wt = -log10(p_value))
+
+p.list <- lapply(1:20, function(i) {
+  if (!paste0("factor_", i) %in% pathways.summarized$factor) return(NULL)
+  ggplot() +
+    geom_point(data = subset(pathways.summarized, factor %in% paste0("factor_", i)), aes(reorder(term_name, -log10(p_value)), -log10(p_value), fill = -log10(p_value), size = GeneRatio), color = "black", shape = 21) +
+    coord_flip() +
+    facet_grid(~factor) +
+    scale_size_continuous(range = c(0.5, 8)) +
+    scale_fill_gradientn(colours = viridis::magma(n = 9) %>% rev()) +
+    theme_minimal() +
+    labs(x = "term", y = "")
+})
+
+p.list[[2]]
+
+```
+
+
+```{r pathway_genes}
+
+dt <- do.call(rbind, lapply(seq_along(top.genes), function(i) {
+  data.frame(gene = top.genes[[i]], factor = paste0("factor_", i), value = se@reductions$NMF@feature.loadings[top.genes[[i]], i], rank = 1:length(top.genes[[i]]))
+}))
+DT::datatable(dt)
+
+```
+
+
+```{r}
+
+FactorGeneLoadingPlot(se.integrated, factor = 1)
+DefaultAssay(se.integrated) <- "SCT"
+Idents(se.integrated) <- "seurat_clusters"
+pbmc.markers <- FindAllMarkers(se.integrated, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+pbmcmarkerstop5 <- pbmc.markers %>%
+    group_by(cluster) %>%
+    slice_max(n = 5, order_by = avg_log2FC)
+
+features1 <- unique(pbmcmarkerstop5$gene)
+
+pbmcmarkers.barplot <- select(pbmcmarkerstop5, c("avg_log2FC", "gene", "cluster"))
+
+p<-ggplot(data=pbmcmarkers.barplot, aes(x=reorder(gene, avg_log2FC), y=avg_log2FC, fill = cluster)) +
+  geom_bar(stat="identity", colour = "black") +
+  facet_wrap(~cluster, scales = "free", ncol = 8)
+
+png("top5genes.png", width = 14, height = 3, units = "in", res = 300)
+p + coord_flip() + theme_ggstatsplot() + scale_fill_brewer(palette = "Dark2")
+dev.off()
+```
+
+
+
+
+```{r CMYK_plot, fig.width=12, fig.height=6, out.width="100%"}
+
+se.epi <- RunUMAP(se.epi, dims = 1:20, reduction = "NMF", reduction.name = "umap.3d", n.components = 3, reduction.key = "UMAP3D_")
+
+dims <- 1:3
+um <- se.epi[["umap.3d"]]@cell.embeddings
+signs <- sign(dims)
+um <- um[, abs(dims)]
+um <- t(t(um)*signs)
+um <- apply(um, 2, scales::rescale, c(0, 100))
+cols <- apply(um, 1, function(x) {
+  cmyk(C = x[1], M = x[2], Y = x[3], K = 0)
+})
+
+d <- data.frame(cols, row.names = names(cols))
+
+tiff("H&E.tiff", width = 4, height = 2, units = "in", res = 600)
+FeatureOverlay(se.epi, spot.colors = d, sampleids = 1:2, ncols = 2, pt.size = 3, pt.alpha = 1)
+dev.off()
+
+```
+
+
+### UMAP
+***
+
+
+```{r run_umap, eval=FALSE, fig.width=7, fig.height=6}
+
+se.epi <- RunUMAP(se.epi, dims = 1:20, reduction = "NMF", n.epochs = 1e3, n.neighbors = 50)
+se.epi <- SetIdent(se.epi, value = "treatment")
+DimPlot(se.epi, reduction = "umap")
+
+
+se.patch <- RunUMAP(se.patch, dims = 1:20, reduction = "NMF", n.epochs = 1e3, n.neighbors = 50)
+se.patch <- SetIdent(se.patch, value = "treatment")
+DimPlot(se.patch, reduction = "umap")
+
+```
+
+## Separate analysis of Uncolonized and T.musculis Sample
+***
+
+
+
+```{r clusters_low_res, eval=FALSE}
+
+metadata <- se.epi@meta.data
+
+metadata <- metadata %>% mutate(sample_id = case_when(
+    endsWith(treatment, "d") ~ "sample_1",
+    endsWith(treatment, "s") ~ "sample_2"
+    ))
+
+se.epi <- AddMetaData(se.epi, metadata)
+
+se.split <- lapply(1:2, function(i) {
+  SubsetSTData(se.epi, spots = rownames(subset(se.epi[[]], sample_id %in% paste0("sample_", i)))) %>% 
+    SCTransform() %>%
+    RunNMF(nfactors = 20)
+})
+
+
+```
+
+
+
+```{r feature_extraction}
+
+# inflexion point selection
+top.genes.uncol <- lapply(1:20, function(i) {
+  vals <- se.split[[1]]@reductions$NMF@feature.loadings[, i]
+  gg <- data.frame(x = 1:length(vals), vals = sort(vals, decreasing = T))
+  gg$gene <- rownames(gg)
+  gg <- subset(gg, vals > 0)
+  gg$logvals <- log(gg$vals)
+  gg$smooth_logvals <- smth.gaussian(x = gg$logvals, windowLength = 10)
+  ggs <- gg[1:500, ]
+  knee <- uik(x = ggs$x, y = ggs$smooth_logvals)
+  ggs[1:knee, ]$gene
+})
+
+pathways.uncol <- lapply(seq_along(top.genes.uncol), function(i) {
+  gset <- top.genes.uncol[[i]]
+  df <- gost(query = gset, organism = "mmusculus", sources = "GO:BP")$result
+  if (is.null(df)) return(NULL)
+  df$factor <- paste0("factor_", i)
+  return(df)
+})
+pathways.uncol <- do.call(rbind, pathways.uncol)
+pathways.uncol$GeneRatio <- pathways.uncol$intersection_size/pathways.uncol$query_size
+pathways.summarized.uncol <- pathways.uncol %>% 
+  group_by(factor) %>%
+  top_n(n = 20, wt = -log10(p_value))
+
+p.list.uncol <- lapply(1:20, function(i) {
+  if (!paste0("factor_", i) %in% pathways.summarized.uncol$factor) return(NULL)
+  g <- subset(pathways.summarized.uncol, factor %in% paste0("factor_", i))
+  g$term_name <- ifelse(nchar(g$term_name) > 40, paste0(substr(g$term_name, start = 1, stop = 40), "..."), g$term_name)
+  ggplot() +
+    geom_point(data = g, aes(reorder(term_name, -log10(p_value)), -log10(p_value), fill = -log10(p_value), size = GeneRatio), color = "black", shape = 21) +
+    coord_flip() +
+    facet_grid(~factor) +
+    scale_size_continuous(range = c(0.5, 8)) +
+    scale_fill_gradientn(colours = viridis::magma(n = 9) %>% rev()) +
+    theme_minimal() +
+    labs(x = "term", y = "")
+})
+
+p.list.uncol[[12]]
+
+```
+
+## Basic patterns
+***
+
+
+```{r nmf_3_factors, eval=FALSE}
+
+se.uncol <- se.split[[1]]
+ribo.genes <- grep(pattern = "^Rpl|^Rps", x = rownames(se.uncol), value = TRUE)
+se.uncol <- RunNMF(se.uncol, nfactors = 3, features = setdiff(VariableFeatures(se.uncol), ribo.genes), reduction.name = "nmf.3", reduction.key = "NMF3_")
+```
+
+```{r nmf_3_factors_plot, fig.width=14, fig.height=10, out.width="100%"}
+
+p1 <- ST.DimPlot(se.uncol, dims = 1:3, center.zero = F, cols = c("dark blue", "cyan", "yellow", "red", "dark red"), reduction = "nmf.3", blend = T, pt.size = 3, dark.theme = F, max.cutoff = "q99")
+se.uncol@reductions$NMF <- se.uncol@reductions$nmf.3
+c(df1, df2) %<-% SummarizeAssocFeatures(se.uncol, features.return = 20)
+p2 <- swne::ggHeat(df2[, ], rescaling = "column") + scale_fill_gradientn(colours = viridis::magma(n = 9) %>% rev())
+
+cowplot::plot_grid(p1, p2, rel_widths = c(2, 1))
+
+```
+
+
+```{r nmf3_one_by_one, fig.width=18, fig.height=6, out.width="100%"}
+
+DimOverlay(se.uncol, dims = 1:3, reduction = "nmf.3", center.zero = FALSE, add.alpha = TRUE, cols = c("dark blue", "cyan", "yellow", "red", "dark red"), pt.size = 2)
+
+```
+
+
+```{r nmf_spatial_plots, fig.width=15, fig.height=15, out.width="100%"}
+
+ST.DimPlot(se.split[[1]], dims = 1:20, center.zero = FALSE, show.sb = FALSE,
+           reduction = "NMF", cols = viridis::magma(n = 9) %>% rev(), 
+           pt.size = 0.7, grid.ncol = 4)
+ST.DimPlot(se.split[[2]], dims = 1:20, center.zero = FALSE, show.sb = FALSE,
+           reduction = "NMF", cols = viridis::magma(n = 9) %>% rev(), 
+           pt.size = 0.7, grid.ncol = 4)
+
+# calculate correlation of each factor with the total number of genes
+cors <- c()
+for (i in 1:20) {
+  cors <- c(cors, cor(se.split[[1]]@reductions$NMF@cell.embeddings[, i], se.split[[1]]$nFeature_RNA))
+}
+which.min(cors)
+min(cors)
+
+```
+
+
+
+```{r nmf_heatmap, fig.width=8, fig.height=12, out.width="100%"}
+
+library(zeallot)
+c(df1, df2) %<-% STutility::SummarizeAssocFeatures(se.split[[1]], features.return = 6)
+p1 <- swne::ggHeat(df2[nrow(df2):1, ], rescaling = "column") + 
+  scale_fill_gradientn(colours = viridis::magma(n = 9) %>% rev()) + 
+  ggtitle("Uncolonized")
+
+png("uncolnmf.png", width = 600, height = 1200, units = "px")
+p1
+dev.off()
+
+c(df1, df2) %<-% STutility::SummarizeAssocFeatures(se.split[[2]], features.return = 6)
+p2 <- swne::ggHeat(df2[nrow(df2):1, ], rescaling = "column") + 
+  scale_fill_gradientn(colours = viridis::magma(n = 9) %>% rev()) +  
+  ggtitle("Tmuris")
+
+png("tmurisnmf.png", width = 600, height = 1200, units = "px")
+p2
+dev.off()
+
+selected.dims <- list(
+  c(setdiff(1:20, 10)),
+  c(1:20)
+)
+
+c(df1, df2) %<-% STutility::SummarizeAssocFeatures(se.epi, features.return = 6)
+p3 <- swne::ggHeat(df2[nrow(df2):1, ], rescaling = "column") + 
+  scale_fill_gradientn(colours = viridis::magma(n = 9) %>% rev()) + 
+  ggtitle("Combine")
+
+png("combinenmf.png", width = 6, height = 12, units = "in", res = 300)
+p3
+dev.off()
+
+
+```
+
+
+# Data integration with Harmony
+***
+
+```{r harmony, fig.width=13, fig.height=6, eval=FALSE}
+
+library(harmony)
+se.epi <- RunPCA(se.epi)
+DefaultAssay(se.epi) <- "SCT"
+se.integrated <- RunHarmony(object = se.epi, group.by.vars = "treatment", assay.use = "SCT", reduction = "NMF")
+se.integrated <- RunUMAP(se.integrated, reduction = "harmony", dims = 1:10, reduction.name = "umap.harmony", n.epochs = 1e3)
+se.integrated <- FindNeighbors(se.integrated, reduction = "harmony", dims = 1:10, force.recalc = T) 
+se.integrated <- FindClusters(se.integrated, graph.name = "SCT_snn", resolution = 0.5)
+
+meta.data <- cbind(se.integrated@meta.data[, c("treatment", "SCT_snn_res.0.5")], GetStaffli(se.integrated)@meta.data[, 1:6])
+
+
+
+library(harmony)
+se.patch <- RunPCA(se.patch)
+DefaultAssay(se.patch) <- "SCT"
+se.integrated.patch <- RunHarmony(object = se.patch, group.by.vars = "treatment", assay.use = "SCT", reduction = "NMF")
+se.integrated.patch <- RunUMAP(se.integrated.patch, reduction = "harmony", dims = 1:10, reduction.name = "umap.harmony", n.epochs = 1e3)
+se.integrated.patch <- FindNeighbors(se.integrated.patch, reduction = "harmony", dims = 1:10, force.recalc = T) 
+se.integrated.patch <- FindClusters(se.integrated.patch, graph.name = "SCT_snn", resolution = 0.5)
+
+```
+
+
+
+```{r plot_harmony, fig.width=13, fig.height=6}
+
+metadata <- se.integrated@meta.data
+
+metadata <- metadata %>% mutate(updated.name = case_when(
+    endsWith(treatment, "d") ~ "Uncolonized",
+    endsWith(treatment, "s") ~ "T. musculis"
+    ))
+se.integrated <- AddMetaData(se.integrated, metadata)
+
+Idents(se.integrated) <- "updated.name"
+
+se.integrated.patch <- SetIdent(se.integrated.patch, value = "treatment")
+p1 <- DimPlot(se.integrated.patch, reduction = "umap.harmony", pt.size = 1)
+se.integrated.patch <- SetIdent(se.integrated.patch, value = "SCT_snn_res.0.5")
+p2 <- DimPlot(se.integrated, reduction = "umap.harmony", pt.size = 0.6)
+
+png("umaptreatment.png", width = 5, height = 4, units = "in", res = 300)
+cowplot::plot_grid(p2)
+dev.off()
+
+se.integrated <- SetIdent(se.integrated, value = "seurat_clusters")
+
+se.integrated <- SetIdent(se.integrated, value = "treatment")
+
+png("umapclusters1.png", width = 5, height = 4, units = "in", res = 300)
+DimPlot(se.integrated, reduction = "umap.harmony", cols = "Paired")
+dev.off()
+
+Idents(haber.transfer) <- "predicted.id"
+DimPlot(haber.transfer, reduction = "umap.harmony", split.by = "seurat_clusters")
+
+harmony.markers <- FindAllMarkers(se.integrated)
+
+patch.markers <- FindAllMarkers(se.integrated.patch)
+
+```
+
+```{r feature overlay}
+
+png("Reg4map.png", width = 1200, height = 600)
+FeatureOverlay(se.integrated, 
+               sampleids = 1:2,
+               features = "Reg4", 
+               pt.size = 3,
+               cols = c("lightgray", "mistyrose", "red", "dark red", "black"), 
+               add.alpha = T,
+               type = "masked",
+               ncols = 2,
+               value.scale = "all")
+dev.off()
+
+Idents(se.integrated) <- "seurat_clusters"
+VlnPlot(se.integrated, features = c("Muc1", "Muc2", "Muc3", "Muc3a", "Muc3b", "Muc4", "Muc5ac", "Muc5b", "Muc6", "Muc12", "Muc13", "Muc15", "Muc16", "Muc17"), split.by = "treatment")
+
+
+```
+
+
+```{r volcano}
+
+
+Idents(se.integrated) <- "treatment"
+treatment.markers <- FindMarkers(se.integrated, ident.1 = "Tmuris", ident.2 = "Uncolonized")
+muris.markers2 <- FindAllMarkers(se.integrated)
+
+
+volmarkers <- subset(muris.markers2, cluster == "Tmuris")
+
+png("volcano.png", width = 2000, height = 1400, res = 300)
+EnhancedVolcano(patch.markers,
+    lab = rownames(patch.markers),
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    xlab = bquote(~Log[2]~ 'fold change'),
+    pCutoff = 10e-14,
+    FCcutoff = 1.0,
+    pointSize = 4.0,
+    labSize = 2.0,
+    labCol = 'black',
+    labFace = 'bold',
+    boxedLabels = TRUE,
+    colAlpha = 4/5,
+    legendPosition = 'none',
+    legendLabSize = 2,
+    legendIconSize = 2.0,
+    drawConnectors = TRUE,
+    widthConnectors = 1.0,
+    colConnectors = 'black')
+dev.off()
+
+```
+
+
+```{r violin plots}
+
+Idents(se.integrated) <- "treatment"
+
+genes <- c("Reg3b", "Reg3g", "Defa24", "Ang4", "Pnliprp2", "Retnlb", "Sprr2a3")
+
+c('Uncolonized' = "#F8766D", 'T. musculis' = "#00BFC4"))
+
+png(file = "Sprr.png", height = 4, width = 4, units = "in", res = 300)
+VlnPlot(se.integrated, features = "Aqp8", split.by = "updated.name", pt.size = 0, cols = c("#00BFC4", "#F8766D")) 
+dev.off()
+
+
+cadwell <- c("Scd1", "Adipoq", "Saa1", "Lrp1", "Lep", "Igrm1")
+
+VlnPlot(se.integrated, features = cadwell, split.by = "treatment", pt.size = 1, combine = T) 
+
+dittoPlot(se.integrated, "Reg3g", group.by = "treatment",
+    plots = c("jitter", "vlnplot", "boxplot"), # <- order matters
+    
+    # change the color and size of jitter points
+    jitter.color = "blue", jitter.size = 0.5,
+    
+    # change the outline color and width, and remove the fill of boxplots
+    boxplot.color = "white", boxplot.width = 0.1,
+    boxplot.fill = FALSE,
+    
+    # change how the violin plot widths are normalized across groups
+    vlnplot.scaling = "count"
+    )
+
+
+```
+
+
+
+
+```{r compare_clusters, fig.width=14, fig.height=6, out.width="100%"}
+
+haber.transfer <- MaskImages(haber.transfer, thresholding = T, iso.blur = 2)
+
+pairedcolors <- RColorBrewer::brewer.pal(8, "Dark2")
+
+ClusterPlotter <- function(object, cluster = "") {
+  FeatureOverlay(object, sampleids = 1:2, features = "seurat_clusters", spots = rownames(subset(object[[]], seurat_clusters %in% cluster)), pt.size = 1.3, ncols = 2, type = "masked", cols = pairedcolors)
+}
+
+png(filename = "clusterplotter1.png", width = 9, height = 4, units= "in", res = 300)
+ClusterPlotter(object = se.integrated, cluster = c("0", "1", "2", "3", "4", "5", "6", "7")) %>% print()
+dev.off
+#These weights sum to 1 and were used as the percentage of the cell type in the spots.
+
+png(filename = "cluster7.png", width = 1000, height = 500)
+ClusterPlotter(object = se.integrated, cluster = c("7")) %>% print()
+dev.off()
+
+habercells
+
+```
+
+
+```{r}
+haber.transfer <- MaskImages(haber.transfer, thresholding = T, iso.blur = 2)
+
+ClusterPlotter2 <- function(object, cluster = "") {
+FeatureOverlay(object, sampleids = 1:2, features = "predicted.id", spots = rownames(subset(object[[]], predicted.id %in% cluster)), pt.size = 3, ncols = 2, type = "masked")}
+  
+ClusterPlotter2(object = haber.transfer, cluster = c("Goblet", "Paneth")) %>% print()
+
+  
+ClusterPlotter2(object = haber.transfer, cluster = c("Tuft")) %>% print()
+
+  
+```
+
+
+
+
+```{r scatter}
+
+ggplot() + geom_scatterpie(aes(x=barcodes$imagecol, y=barcodes$imagerow, group=infected.transfer@meta.data$predicted.id), data=infected.transfer@assays$prediction.score.id,
+                           cols=LETTERS[1:4]) + coord_equal()
+
+barcodes <- as.data.frame(infected.transfer@assays$RNA@counts@Dimnames[[2]])
+
+colnames(barcodes)[1] <- "barcodes"
+
+barcodes$imagecol <- staffliobject@meta.data$x
+barcodes$imagerow <- staffliobject@meta.data$y
+
+barcodes <- column_to_rownames(barcodes, "barcodes")
+
+unique(factor(haber$clusters))
+
+barcodes$treatment <- infected.transfer@meta.data$sample_no
+
+score.id <- as.data.frame(infected.transfer@assays$prediction.score.id@data)
+
+score.id <- t(score.id)
+
+barcode.score <- cbind(barcodes, score.id)
+
+
+rowSums(sapply(barcode.score[,], function(x) as.numeric(as.character(x))))
+
+barcode.score <- as.data.frame(barcode.score)
+
+barcode.score <- lapply(barcode.score, function(x) {
+    if(is.factor(x)) as.numeric(as.character(x)) else x
+})
+
+
+TmurisBarcodeScore <- as.numeric(unlist(TmurisBarcodeScore))
+class(barcode.score$imagerow)
+class(barcode.score$treatment) <- as.integer(barcode.score$treatment)
+
+TmurisBarcodeScore <- barcode.score[barcode.score$treatment == '2',]
+
+TmurisBarcodeScore <- as.data.frame(TmurisBarcodeScore)
+x_nonum <- which(is.na(as.numeric(TmurisBarcodeScore)))
+
+goodmuris <- TmurisBarcodeScore[sapply(TmurisBarcodeScore, is.numeric)]
+
+numeric_cols <- vapply(goodmuris, is.numeric, logical(1))
+goodmuris[, 3:14] <- lapply(goodmuris[, 3:14, drop = FALSE],
+                             function(x) x * 100)
+
+cells <- c("TA", "Stem.1", "EnterocyteP", "Stem.2", "Cluster4", "Goblet", "Enterocyte", "EnterocyteP.2", "Tuft", "Enterocyte.2", "Endocrine", "Paneth")
+
+ggplot() + geom_scatterpie(aes(x = imagecol, y = imagerow), data = goodmuris, pie_scale = 0.3, cols = cells) + coord_fixed()
+
+```
+
+```{r scatterpie haber}
+#adding sample number to haber transfer data
+metadata <- metadata %>% mutate(sample_no = case_when(
+    endsWith(treatment, "d") ~ "1",
+    endsWith(treatment, "s") ~ "2"
+    ))
+haber.transfer <- AddMetaData(haber.transfer, metadata)
+
+score.haber <- as.data.frame(haber.transfer@assays$prediction.score.id@data)
+
+score.haber <- t(score.haber)
+
+#Getting Cell identities from Haber Clusters
+unique(factor(haber@meta.data$clusters))
+habercells <- unique(factor(haber@meta.data$clusters))
+habercells <- as.vector(habercells)
+
+
+barcodes.haber <- as.data.frame(haber.transfer@assays$RNA@counts@Dimnames[[2]])
+
+colnames(barcodes.haber)[1] <- "barcodes"
+
+staffliobject <- GetStaffli(haber.transfer)
+
+barcodes.haber$x <- staffliobject@meta.data$adj_x
+barcodes.haber$y <- staffliobject@meta.data$adj_y
+barcodes.haber <- column_to_rownames(barcodes.haber, "barcodes")
+barcodes.haber$treatment <- haber.transfer@meta.data$sample_no
+
+haber.score <- cbind(barcodes.haber, score.haber)
+
+ControlHaberScore <- haber.score[haber.score$treatment == '1',]
+TmurisHaberScore <- haber.score[haber.score$treatment == '2',]
+
+
+#color palette
+
+# Define the number of colors you want
+nb.cols <- 13
+mycolors <- colorRampPalette(brewer.pal(8, "PiYG"))(nb.cols)
+
+png("Tmurisscatterpie4.png", width = 4000, height = 3000, bg = "transparent")
+ggplot() + geom_scatterpie(aes(x = x, y = y), data = TmurisHaberScore, pie_scale = 0.3, cols = habercells) + theme_void() + scale_y_reverse() + coord_fixed()
+dev.off()
+
+png("Controlscatterpie2.png", width = 2000, height = 2500, bg = "transparent")
+ggplot() + geom_scatterpie(aes(x = y, y = x), data = ControlHaberScore, pie_scale = 0.65, cols = habercells) + theme_void() + scale_y_reverse() + coord_fixed()
+dev.off()
+
+
+Tmurisimage <- GetStaffli(haber.transfer)
+Tmurisimage <- iminfo(Tmurisimage)
+Tmurisimage <- Tmurisimage[2]
+class(Tmurisimage)
+
+Tmurisimage <- rasterlists(haber.transfer)
+
+ST.ImagePlot(haber.transfer)
+
+DimPlot(se)
+
+```
+
+```{r scatterpie stats}
+
+Gobletspots <- subset(TmurisHaberScore, Goblet > 0.4)
+
+1071 / 1652
+
+Gobconspots <- subset(ControlHaberScore, Goblet > 0.4)
+
+1/1174
+
+GobPanspots <- subset(TmurisHaberScore, Goblet > 0.4 & Paneth > 0.4)
+323/1652
+
+GobPanconspots <- subset(ControlHaberScore, Goblet > 0.4 & Paneth > 0.4)
+
+0/1174
+
+Panethspots <- subset(TmurisHaberScore, Paneth > 0.4)
+
+750 / 1652
+
+Panethcontrolspots <- subset(ControlHaberScore, Paneth > 0.4)
+21 / 1174
+
+
+tuftconspots <- subset(ControlHaberScore, Tuft > 0)
+
+tuftTmspots <- subset(TmurisHaberScore, Tuft > 0)
+
+
+```
+
+
+```{r ggstatplots}
+
+Haberscoreannot <- haber.score %>% mutate(condition = case_when(
+    endsWith(treatment, "1") ~ "Uncolonized",
+    endsWith(treatment, "2") ~ "T. musculis"
+    ))
+
+## setup
+
+
+
+Goblet <- Haberscoreannot[, c("condition", "Goblet")] 
+
+Paneth <- Haberscoreannot[, c("condition", "Paneth")]
+
+png("Panethstat1.png", width = 3, height = 4, units = "in", res = 300)
+ggbetweenstats(
+  data = Paneth,
+  x = condition,
+  y = "Paneth",
+  type = "p", ## type of statistics
+  xlab = "", ## label for the x-axis
+  ylab = "%Composition of Paneth score per Spot", ## label for the y-axis
+  plot.type = "boxviolin", ## type of plot
+  pairwise.comparisons = TRUE,
+  outlier.tagging = F,
+  pairwise.display = "s",
+  p.adjust.method = "BF",
+  results.subtitle = F
+) + scale_color_manual(values=c("blue", "blue")) + scale_x_discrete(limits=c("Uncolonized","T. musculis"))
+dev.off()
+
+png("Gobletstat1.png", width = 3, height = 4, units = "in", res = 300)
+ggbetweenstats(
+  data = Goblet,
+  x = condition,
+  y = "Goblet",
+  type = "p", ## type of statistics
+  xlab = "", ## label for the x-axis
+  ylab = "%Composition of Goblet score per Spot", ## label for the y-axis
+  plot.type = "boxviolin", ## type of plot
+  pairwise.comparisons = TRUE,
+  outlier.tagging = F,
+  pairwise.display = "s",
+  p.adjust.method = "BF",
+  results.subtitle = F
+) + scale_color_manual(values=c("red", "red")) + scale_x_discrete(limits=c("Uncolonized","T. musculis"))
+dev.off()
+
+
+png("GobletPanethstat.png", width = 9, height = 12, units = "in", res = 300)
+grouped_ggscatterstats(
+  ## arguments relevant for ggscatterstats
+  data = Haberscoreannot,
+  x = Paneth,
+  y = Goblet,
+  grouping.var = condition,
+  type = "p",
+  xlab = "Paneth score", 
+  ylab = "Goblet score", results.subtitle = FALSE,
+  point.args = aes(colour = ),
+  # ggtheme = ggthemes::theme_tufte(),
+  ## arguments relevant for combine_plots
+  annotation.args = list(
+    title = "Paneth Cell Goblet Cell Ratio"
+  ),
+  plotgrid.args = list(nrow = 2, ncol = 1)
+)
+dev.off()
+
+colors <- chooseColors(Haberscoreannot[,6], Haberscoreannot[,16])
+
+
+
+```
+```{r subset}
+
+hybridspots <- subset(Haberscoreannot, subset = Paneth > 0.35 & Goblet > 0.35)
+
+hybridspots <- rownames_to_column(hybridspots)
+
+spotstokeep <- hybridspots$rowname
+
+hybridspotST <- SubsetSTData(haber.transfer, spots = spotstokeep)
+
+
+Idents(hybridspotST) <- "predicted.id"
+DimPlot(hybridspotST, reduction = "umap.harmony", split.by = "seurat_clusters")
+
+Idents(hybridspotST) <- "seurat_clusters"
+DimPlot(hybridspotST, reduction = "umap.harmony")
+
+harmony.markers <- FindAllMarkers(se.integrated)
+
+```
+
+```{r scale color}
+
+
+chooseColors <- function(x, y) {
+  x <- 1-x/max(x)
+  y <- 1-y/max(y)
+  return(rgb(green=1-y, red=0, blue=1-x, 0.2))
+}
+
+panethgoblethaber <- select(Haberscoreannot, c("Paneth", "Goblet", "condition"))
+
+muris.panethgoblethaber <- subset(panethgoblethaber, subset = condition == "Tmuris")
+
+rownames(panethgoblethaber) <- NULL
+
+
+plot(muris.panethgoblethaber$Paneth, muris.panethgoblethaber$Goblet, col=(chooseColors(muris.panethgoblethaber[,1], muris.panethgoblethaber[,2])), pch=16, cex = 1.2)
+
+
+hist(panethgoblethaber$Paneth)
+
+hist(panethgoblethaber$Goblet)
+```
+```{r scatter}
+
+chooseColors1 <- function(x, y) {
+  x <- 1-x/max(x)
+  y <- 1-y/max(y)
+  return(rgb(green=0, red=1-y, blue=1-x, 0.5))
+}
+
+uncol.panethgoblethaber <- subset(panethgoblethaber, subset = condition == "Uncolonized")
+
+
+plot(uncol.panethgoblethaber$Paneth, uncol.panethgoblethaber$Goblet, col=(chooseColors1(uncol.panethgoblethaber[,1], uncol.panethgoblethaber[,2])), pch=16, cex = 1.2, xlim = c(0,1))
+
+```
+
+
+
+
+```{r ggstatplots}
+
+
+drop <-c("x", "y")
+df = Haberscoreannot[,!(names(Haberscoreannot) %in% drop)]
+
+melts <- melt(df)
+
+melts <- as.data.frame(melts)
+
+melts$celltype <- melts$variable
+
+melts$condition <- factor(melts$condition, levels = c("Uncolonized", "T. musculis"))
+
+p <- ggplot(melts, aes(x=variable, y=value, fill=condition)) + 
+  xlab("Cell Type") +
+  ylab("Proportion of celltype per spot") +
+  geom_violin(scale = "width")
+
+p + scale_color_brewer(palette="Dark2") + scale_x_discrete(labels=c("1" = "Uncolonized", "2" = "T. musculis"))
+
+png("Epicells1.png", width = 16, height = 6, units = "in", res = 300)
+p + theme_ggstatsplot() + theme(axis.text.x = element_text(angle = 45, hjust=1))
+dev.off()
+
+
+```
+
+```{r histograms}
+
+Goblet
+
+ggplot(Goblet, aes(Goblet, fill = condition, )) + 
+   geom_histogram(alpha = 0.5, position = 'identity') + theme_ggstatsplot() +labs(x = "Goblet Cell Signature Score", y= "Quantity of Visium Spots") +scale_fill_manual(breaks = c("Tmuris", "Uncolonized"), values=c("blue", "dodgerblue"))
+
+
+ggplot(Paneth, aes(Paneth, fill = condition)) + 
+   geom_histogram(alpha = 0.5, position = 'identity') + theme_ggstatsplot() +labs(x = "Paneth Cell Signature Score", y= "Quantity of Visium Spots") +scale_fill_manual(breaks = c("Tmuris", "Uncolonized"), values=c("red", "orangered"))
+
+png("Panethhist.png", width = 12, height = 9, units = "in", res = 300)
+grouped_gghistostats(
+  ## arguments relevant for gghistostats
+  data = Paneth,
+  x = Paneth, ## same outcome variable
+  xlab = "Paneth Score",
+  grouping.var = condition, ## grouping variable males = 1, females = 2
+  type = "p", ## robust test: one-sample percentile bootstrap
+  test.value = 20, ## test value against which sample mean is to be compared
+  centrality.line.args = list(color = "blue", linetype = "dashed"),
+  # ggtheme = ggthemes::theme_stata(), ## changing default theme
+  ## turn off ggstatsplot theme layer
+  ## arguments relevant for combine_plots
+  annotation.args = list(
+    title = "Distribution of Visium Spots with Paneth Cell Signature"
+  ),
+  plotgrid.args = list(nrow = 2)
+)
+dev.off()
+
+
+png("Goblethist.png", width = 12, height = 9, units = "in", res = 300)
+grouped_gghistostats(
+  ## arguments relevant for gghistostats
+  data = Goblet,
+  x = Goblet, ## same outcome variable
+  xlab = "Goblet Score",
+  grouping.var = condition, ## grouping variable males = 1, females = 2
+  type = "p", ## robust test: one-sample percentile bootstrap
+  test.value = 20, ## test value against which sample mean is to be compared
+  centrality.line.args = list(color = "blue", linetype = "dashed"),
+  # ggtheme = ggthemes::theme_stata(), ## changing default theme
+  ## turn off ggstatsplot theme layer
+  ## arguments relevant for combine_plots
+  annotation.args = list(
+    title = "Distribution of Visium Spots with Goblet Cell Signature"
+  ),
+  plotgrid.args = list(nrow = 2)
+)
+dev.off()
+```
+
+
+
+
+```{r image}
+
+GetCropWindows <- function (
+  object,
+  group.by = NULL,
+  groups.to.keep = NULL,
+  xy_padding = 50
+) {
+  
+  # Check to see if Staffli object is present
+  if (!"Staffli" %in% names(object@tools)) stop("Staffli object is missing from Seurat object. ", call. = FALSE)
+  st.object <- object@tools$Staffli
+  
+  # Check group.by
+  group.by <- group.by %||% "labels"
+  group.by.keep <- group.by
+  if (!group.by %in% colnames(object@meta.data)) stop("group.by is not available in the Seurat object meta.data slot. ", call. = FALSE)
+  group.by <- object@meta.data[, group.by]
+  if (!class(group.by) %in% c("character", "factor")) stop(paste0("Invalid group.by column of class ", class(group.by)), call. = FALSE)
+  group.by <- as.character(group.by)
+  if (length(unique(group.by)) == 1) stop("Only one group provided.")
+  
+  coords <- data.frame(st.object@meta.data[, c("pixel_x", "pixel_y")], Var = group.by, section = st.object@meta.data$sample)
+  
+  # Reduce groups
+  if (!is.null(groups.to.keep)) {
+    coords <- subset(coords, Var %in% groups.to.keep) 
+  }
+  
+  # Get groups
+  if (!is.null(groups.to.keep)) {
+    grps <- groups.to.keep
+  } else {
+    if (is.null(group.by)) {
+      grps <- setdiff(unique(coords$Var), "Default")
+    } else {
+      grps <- unique(coords$Var)
+    }
+  }
+  
+  crop.geoms.all.sections <- Reduce(c, lapply(unique(coords$section), function(sid) {
+    coords.subset <- subset(coords, section %in% sid)
+    crop.geoms <- lapply(grps, function(grp) {
+      coords.subset.grp <- subset(coords.subset, Var %in% grp)
+      if (nrow(coords.subset.grp) == 0) return(NULL)
+      minxy <- apply(coords.subset.grp[, c("pixel_x", "pixel_y")], 2, range)
+      minxy[1, ] <- minxy[1, ] - xy_padding
+      minxy[2, ] <- minxy[2, ] + xy_padding
+      minxy <- round(minxy)
+      wh <- apply(minxy, 2, diff)
+      geom <- setNames(c(paste0(wh[1], "x", wh[2], "+", minxy[1, 1], "+", minxy[1, 2]), grp, group.by.keep), nm = c("geom", "group", "group.by"))
+    })
+    crop.geoms <- crop.geoms[!sapply(crop.geoms, is.null)]
+    names(crop.geoms) <- rep(sid, length(crop.geoms))
+    return(crop.geoms)
+  }))
+
+  return(crop.geoms.all.sections)
+  
+}
+
+se.integrated <- ManualAnnotation(se.integrated)
+crop_windows <- list("1" = "1000x900+400+400", "2" = "1000x900+700+800")
+
+crop.geoms <- GetCropWindows(se.integrated, group.by = "labels", groups.to.keep = paste0("crop", 1:2))
+
+
+
+se.cropped <- CropImages(se.integrated, crop.geometry.list = crop.geoms, xdim = 2000, time.resolve = FALSE, verbose = TRUE)
+
+im <- magick::image_read(GetStaffli(se.integrated)@imgs[1]) %>% imager::magick2cimg()
+
+corners <- apply(do.call(rbind, sapply(crop.geoms, function(x) {
+  strsplit(x[1], "x|\\+")
+})), 2, as.numeric)
+{plot(im)
+
+rect(xleft = corners[1, 3], ybottom = corners[1, 4], xright = corners[1, 3] + corners[1, 1], ytop = corners[1, 4] + corners[1, 2])}
+
+
+```
+
+
+```{r}
+
+ClusterPlotter <- function(object, cluster = "") {
+  FeatureOverlay(object, sampleids = 1:2, features = "SCT_snn_res.0.5", spots = rownames(subset(object[[]], SCT_snn_res.0.5 %in% cluster)), pt.size = 3, ncols = 2)
+}
+
+ClusterPlotter(object = se.integrated, cluster = "11") %>% print()
+
+ggplot() + geom_scatterpie(aes(x=))
+
+
+```
+
+
+```{r}
+
+ClusterPlotter3 <- function(object, cluster = "") {
+  FeatureOverlay(object, sampleids = 1:2, features = "labels", spots = rownames(subset(object[[]], labels %in% cluster)), pt.size = 3, ncols = 2, type = "masked", value.scale = "all", layout.by.feature = T)
+}
+
+png("grosscompartments.png", width = 1200, height = 600)
+ClusterPlotter3(object = se.manual, cluster = c("Muscle", "Epi/LP", "PP")) %>% print()
+dev.off()
+
+ggplot() + geom_scatterpie(aes(x=))
+
+Spotcords1 <- rownames(se.manual[[]])
+
+metadatas1 <- se.manual$labels
+
+spotdod1 <- data.frame(Spotcords1, metadatas1)
+
+spotcordcolors1 <- spotdod1 %>% mutate(colors = case_when(
+    endsWith(metadatas1, "Muscle") ~ "#F93943",
+    endsWith(metadatas1, "Epi/LP") ~ "#445E93",
+    endsWith(metadatas1, "PP") ~ "#FCECC9"
+    ))
+
+colorspots1 <- spotcordcolors1["colors"]
+
+ClusterPlotter6 <- function(object, cluster = "") {
+  FeatureOverlay(object, sampleids = 1:2, pt.size = 1, ncols = 2, type = "masked", value.scale = "all", layout.by.feature = F, center.zero = F, spot.colors = colorspots1, pt.alpha = 1)
+}
+
+
+tiff("grosscompartment.tiff", height = 3, width = 5, units = "in", res = 1200, bg = "transparent")
+ClusterPlotter6(se.manual, cluster = c("Muscle", "Epi/LP", "PP")) %>% print()
+dev.off()
+
+ST.FeaturePlot(haber.transfer, features = "predicted.id", split.labels = TRUE, indices = 1)
+
+
+Spotcords <- rownames(haber.transfer[[]])
+
+metadatas <- haber.transfer$predicted.id
+
+spotdod <- data.frame(Spotcords, metadatas)
+
+spotcordcolors <- spotdod %>% mutate(colors = case_when(
+    endsWith(metadatas, "Enterocyte.Mature.Distal") ~ "#1B9E77",
+    endsWith(metadatas, "Enterocyte.Immature.Distal") ~ "#D95F02",
+    endsWith(metadatas, "TA.Early") ~ "#7570B3",
+    endsWith(metadatas, "Enterocyte.Progenitor") ~ "#E7298A",
+    endsWith(metadatas, "Paneth") ~ "#66A61E",
+    endsWith(metadatas, "Enterocyte.Progenitor.Early") ~ "#E6AB02",
+    endsWith(metadatas, "Enterocyte.Progenitor.Late") ~ "#A6761D",
+    endsWith(metadatas, "Goblet") ~ "#666666"
+    ))
+
+colorspots <- spotcordcolors["colors"]
+
+unique(spotdod$metadatas)
+
+
+
+
+ClusterPlotter5 <- function(object, cluster = "") {
+  FeatureOverlay(object, sampleids = 1:2, features = "predicted.id", spots = rownames(subset(object[[]], predicted.id %in% cluster)), pt.size = 3, ncols = 2, type = "masked", value.scale = "all", layout.by.feature = F, center.zero = F, cols = c("#1B9E77", "#D95F02", "#7570B3", "#E7298A", "#66A61E", "#E6AB02", "#A6761D", "#666666"))
+}
+
+
+ClusterPlotter5 <- function(object, cluster = "") {
+  FeatureOverlay(object, sampleids = 1:2, pt.size = 3, ncols = 2, type = "masked", value.scale = "all", layout.by.feature = F, center.zero = F, spot.colors = colorspots)
+}
+
+ClusterPlotter5(haber.transfer, cluster = habercells) %>% print()
+
+```
+
+## DE analysis of integrated clusters
+***
+
+
+```{r split_integrated}
+
+se.integrated.split <- lapply(c("Uncolonized", "Tmuris"), function(d) {
+  se.subset <- SubsetSTData(se.integrated, spots = rownames(subset(se.integrated[[]], treatment %in% d)))
+})
+```
+
+```{r de_integrated, eval=FALSE}
+
+de.integrated.split <- lapply(se.integrated.split, function(sen) {
+  sen <- SetIdent(sen, value = "SCT_snn_res.0.5")
+  FindAllMarkers(sen, only.pos = TRUE)
+})
+```
+
+```{r filtered}
+
+de.integrated.split.filtered <- lapply(de.integrated.split, function(de) {
+  de %>% group_by(cluster) %>%
+    filter(avg_log2FC > 0 & p_val_adj < 0.01) %>%
+    arrange(cluster, p_val_adj) 
+})
+
+
+intersecting.markers <- setNames(lapply(1:8, function(i) {
+  set1 <- subset(de.integrated.split.filtered[[1]], cluster %in% paste0(i - 1))[, c(2:5, 7)]
+  colnames(set1)[1:4] <- paste0("Uncolonized_", colnames(set1)[1:4])
+  set1$Uncolonized_rank <- NA
+  set1$Uncolonized_rank <- 1:nrow(set1[i,])
+  set2 <- subset(de.integrated.split.filtered[[2]], cluster %in% paste0(i - 1))[, c(2:5, 7)]
+  set2 <- as.data.frame(set2)
+  
+  if (nrow(set2) == 0) {
+    mrg <- set1
+  } else {
+    colnames(set2)[1:4] <- paste0("Tmuris_", colnames(set2)[1:4])
+    set2$Tmuris_rank <- NA
+    set2$Tmuris_rank <- 1:nrow(set2[i,])
+    mrg <- merge(set1, set2, by = "gene", all = TRUE) %>% arrange(Uncolonized_p_val_adj)
+    mrg$upregulated_in <- ifelse(is.na(mrg$Uncolonized_rank), "Tmuris", ifelse(is.na(mrg$Tmuris_rank), "Uncolonized", "both"))
+    mrg$cluster <- paste0(i - 1)
+  }
+  print(dim(mrg))
+  return(mrg)
+}), nm = paste0(0:7))
+
+
+```
+
+
+```{r de_heatmap, fig.width=8, fig.height=16}
+
+intersecting.markers <- do.call(plyr::rbind.fill, intersecting.markers)
+im <- subset(intersecting.markers, upregulated_in %in% "Uncolonized") %>%
+    group_by(cluster) %>%
+    top_n(n = 10, wt = -Uncolonized_p_val_adj)
+im <- im$gene
+heatmap.dfs <- lapply(seq_along(de.integrated.split), function(i) {
+  sent <- se.integrated.split[[i]]
+  group.var <- sent$SCT_snn_res.0.5
+  scale.data <- sent@assays$SCT@scale.data
+  gene_attr <- t(rowsum(x = t(scale.data[unique(im), ]), group = group.var))
+  return(gene_attr)
+})
+
+d <- list()
+for (i in 1:8) {
+  d <- c(d, data.frame(heatmap.dfs[[1]][, i], heatmap.dfs[[2]][, i]))
+}
+d <- do.call(cbind, d)
+d <- setNames(as.data.frame(d), nm = paste0(rep(0:7, each = 2), "_", rep(c("Uncolonized", "Tmuris", times = 8))))
+rownames(d) <- unique(im)
+ann <- data.frame(condition = rep(c("Uncolonized", "Tmuris"), times = 8), row.names = colnames(d))
+p <- pheatmap::pheatmap(scale(d), cluster_rows = F, cluster_cols = T, breaks = seq(-4.5, 4.5, length.out = 51), color = colorRampPalette(RColorBrewer::brewer.pal(n = 10, name = "RdBu") %>% rev())(50), border_color = NA, annotation_col = ann)
+
+tiff("pheatmap.tiff", width = 500, height = 1200, units = "px", res = 300)
+p
+dev.off()
+
+```
+
+```{r}
+
+
+im1 <- subset(intersecting.markers, upregulated_in %in% "Tmuris") %>%
+    group_by(cluster) %>%
+    top_n(n = 10, wt = -Tmuris_p_val_adj)
+im1 <- im1$gene
+
+heatmap.genes <- c("Reg3b", "Reg3g", "Ang4", "Gsdmc2", "Gsdmc4", "Pla2g4c", "Reg4", "Pnliprp2", "Clps", "Defa23", "Fabp6", "Anpep", "Ubd", "Upp1", "Defa30", "Defa24", "Myl9", "Tagln", "Sprr2a3", "Duoxa2", "Muc2", "Itln1")
+
+heatmap.genes.ordered <- c("Reg3b", "Reg3g", "Fabp6", "Anpep", "Ubd", "Upp1", "Selenop", "Reg4", "Ang4", "Retnlb", "Defa24", "Gsdmc2", "Gsdmc4", "Pla2g4c", "Pnliprp2", "Clps", "Defa30", "Defa24","Sprr2a2","Sprr2a3", "Duoxa2", "Muc2", "Itln1","Mptx2", "St6galnac6", "Epcam", "Vil1")
+
+
+heatmap.genes1 <- c("Cd74", "Igha", "Igkc", "Cd55", "H1-Ab1", "Iglc1", "Selenop", "Gpx2", "Jchain", "Cd24a", "H2-Eb1", "B2m", "Ccl5", "Ada", "Gzma", "Pigr", "Cda", "Ighg2b", "H2-D1", "Ceacam1", "Stat1", "Cd9", "Ccl25", "H2-Q2", "H2-T23", "H2-DMb1", "Gprc5a", "Ikbkb", "H2-K1", "H2-Aa")
+
+heatmap.genes1 <- c("Cd74", "Igha", "Igkc", "Cd55", "Iglc1", "Selenop", "Gpx2", "Jchain", "Cd24a", "H2-Eb1", "B2m", "Ccl5", "Ada", "Gzma", "Pigr", "Cda", "Ighg2b", "H2-D1", "Ceacam1", "Stat1", "Cd9", "Ccl25", "H2-Q2", "H2-T23", "H2-DMb1", "Gprc5a", "Ikbkb", "H2-K1", "H2-Aa", "H2-Ab1")
+
+heatmap.dfs <- lapply(seq_along(de.integrated.split), function(i) {
+  sent <- se.integrated.split[[i]]
+  group.var <- sent$SCT_snn_res.0.5
+  scale.data <- sent@assays$SCT@scale.data
+  gene_attr <- t(rowsum(x = t(scale.data[unique(heatmap.genes.ordered), ]), group = group.var))
+  return(gene_attr)
+})
+
+d <- list()
+for (i in 1:8) {
+  d <- c(d, data.frame(heatmap.dfs[[1]][, i], heatmap.dfs[[2]][, i]))
+}
+d <- do.call(cbind, d)
+
+names <- c("0_Uncolonized", "0_Tmuris", "1_Uncolonized", "1_Tmuris", "2_Uncolonized", "2_Tmuris", "3_Uncolonized", "3_Tmuris", "4_Uncolonized", "4_Tmuris", "5_Uncolonized", "5_Tmuris", "6_Uncolonized", "6_Tmuris", "7_Uncolonized", "7_Tmuris")
+names_order <- c("0_Uncolonized", "1_Uncolonized",  "2_Uncolonized", "3_Uncolonized", "4_Uncolonized", "5_Uncolonized", "6_Uncolonized",  "7_Uncolonized", "0_Tmuris", "1_Tmuris", "2_Tmuris", "3_Tmuris", "4_Tmuris",  "5_Tmuris",  "6_Tmuris", "7_Tmuris")
+
+
+
+condition_order <- c("Uncolonized", "Uncolonized", "Uncolonized", "Uncolonized", "Uncolonized", "Uncolonized", "Uncolonized", "T. musculis", "T. musculis", "T. musculis", "T. musculis", "T. musculis", "T. musculis", "T. musculis", "T. musculis")
+
+condition_order <- factor(condition_order, levels = c("Uncolonized", "T. musculis"))
+
+d <- setNames(as.data.frame(d), nm = names)
+
+rownames(d) <- unique(heatmap.genes.ordered)
+
+ordereddata <- d[, names_order]
+
+drop <- "7_Uncolonized"
+
+ordereddata1 <- ordereddata[,!(names(ordereddata) %in% drop)]
+
+annotation.colors <- list(Condition = c('Uncolonized' = "#F8766D", 'T. musculis' = "#00BFC4"))
+
+ann1 <- data.frame(Condition = condition_order, row.names = colnames(ordereddata1))
+p1 <- pheatmap::pheatmap(scale(ordereddata1), cluster_rows = F, cluster_cols = F, breaks = seq(-4.5, 4.5, length.out = 51), color = colorRampPalette(RColorBrewer::brewer.pal(n = 11, name = "RdBu") %>% rev())(50), border_color = NA, annotation_col = ann1, annotation_colors = annotation.colors)
+
+tiff("pheatmap7.tiff", width = 5, height = 7, units = "in", res = 300)
+p1
+
+dev.off()
+
+
+
+```
+
+```{r}
+
+FeatureOverlay(se.integrated, features = "seurat_clusters", ncols.samples = 2, spots = rownames(subset(se.cca[[]], seurat_clusters == c(0,1,2,3))),sampleids = 1:2, pt.alpha = 0.7, pt.size = 3, cols = c("blue3", "red3", "orange", "green", "black", "purple"), custom.theme = theme(legend.title = element_blank(), plot.title = element_blank()), sample.label = F)
+
+```
+
+```{r}
+
+se.muris <- RunNMF(se.muris, nfactors = 20)
+se.muris <- RunUMAP(se.muris, reduction = "NMF", dims = 1:10, reduction.name = "umap", n.epochs = 1e3)
+se.muris <- FindNeighbors(se.muris, reduction = "umap", dims = 1:2, force.recalc = T) 
+se.muris <- FindClusters(se.muris, graph.name = "SCT_snn", resolution = 0.5)
+
+DimPlot(se.muris)
+FeatureOverlay(se.muris, features = "tuft_cell_1", sampleids = 1, ncols = 1, pt.alpha = 0.75, pt.size = 3)
+
+muris.markers <- FindAllMarkers(se.muris)
+
+se.muris <- AddModuleScore(se.muris, features = tuftcell, assay = "SCT", name = "tuft_cell_")
+
+se.uncol <- AddModuleScore(se.uncol, features = tuftcell, assay = "SCT", name = "tuft_cell_")
+FeatureOverlay(se.uncol, features = "tuft_cell_1", sampleids = 1, ncols = 1, pt.alpha = 0.75, pt.size = 3)
+
+```
+
+
+```{r}
+
+spot.identity <- GetAssay(haber.transfer, slot = "prediction.score.id")
+
+
+spot.identity <- as.matrix(spot.identity)
+
+si.epi <- LoadImages.Seurat(si.epi)
+
+
+```
+
+```{r crop windorws}
+
+
+se.uncol <- ManualAnnotation(se.uncol)
+
+FeatureOverlay(se.uncol, features = "labels")
+
+crop.geoms <- GetCropWindows(se.uncol, groups.to.keep = "crop9")
+
+im <- magick::image_read(GetStaffli(se.uncol)@imgs[1]) %>% imager::magick2cimg()
+
+corners <- apply(do.call(rbind, sapply(crop.geoms, function(x) {
+  strsplit(x[1], "x|\\+")
+})), 2, as.numeric)
+plot(im) +
+rect(xleft = corners[, 3], ybottom = corners[, 4], xright = corners[, 3] + corners[, 1], ytop = corners[, 4] + corners[, 2])
+
+se.uncolcropped <- CropImages(se.uncol, crop.geometry.list = list("1" = "250x160+636+888"), xdim = 500, time.resolve = FALSE, verbose = TRUE) 
+
+msk.fkn <- function(im) {
+  suppressWarnings({
+    im <- imager::grayscale(im)
+    im <- imager::isoblur(im, 6)
+    out <- imager::threshold(im)
+    out <- !out
+    out <- imager::fill(out, 10)
+    out <- EBImage::as.Image(out)
+    out <- EBImage::fillHull(out)
+    out <- imager::as.pixset(out)
+  })
+  return(out)
+}
+
+
+
+ImagePlot(se.uncolcropped, ncols = 1, method = "raster", annotate = F) 
+
+cropuncol <- SubsetSTData(haber.transfer, expression = treatment %in% "Uncolonized")
+
+se.uncolcropped <- CropImages(cropuncol, crop.geometry.list = list("1" = "250x160+636+888" ), xdim = 500, time.resolve = FALSE, verbose = TRUE)
+
+se.uncolcropped <- MaskImages(se.uncolcropped, thresholding = T, iso.blur = 0.65, verbose = TRUE) 
+
+im5 <- ImagePlot(se.uncolcropped, ncols = 1, method = "raster", annotate = F) 
+
+
+
+im2 <- magick2cimg(GetStaffli(se.muriscropped)@rasterlists["masked"])
+
+rasterimage <- raster(staffliobject@rasterlists$masked$`1`)
+
+
+score.uncol.crop <- as.data.frame(se.uncolcropped@assays$prediction.score.id@data)
+
+score.uncol.crop <- as.data.frame(t(score.uncol.crop))
+
+
+barcodes.uncol <- as.data.frame(se.uncolcropped@assays$RNA@counts@Dimnames[[2]])
+
+colnames(barcodes.uncol)[1] <- "barcodes"
+
+staffliobject <- GetStaffli(se.uncolcropped) 
+
+barcodes.uncol$x <- staffliobject@meta.data$x
+barcodes.uncol$y <- staffliobject@meta.data$y
+barcodes.uncol <- column_to_rownames(barcodes.uncol, "barcodes")
+
+imr <- image_read(staffliobject@rasterlists$raw$`1`) 
+
+uncol.score <- cbind(barcodes.uncol, score.uncol.crop)
+
+png("Uncolscatterpiecrop.png", width = 10, height = 4, units = "in", res = 300)
+ggplot() + geom_scatterpie(aes(x = x, y = y), data = uncol.score, pie_scale = 1.2, cols = habercells, show.legend = FALSE) +coord_fixed()  +theme_void() + scale_y_reverse() +  annotation_custom(rasterGrob(imr, 
+                               width = unit(1,"npc"),
+                               height = unit(1,"npc")), 
+                    -Inf, Inf, -Inf, Inf) 
+dev.off()
+
+
+png("Uncolscatterpiwecrop2.png", width = 10, height = 4, units = "in" ,bg = "transparent", res = 300)
+ggplot() + geom_scatterpie(aes(x = x, y = y), data = uncol.score, pie_scale = 1.5, cols = habercells, show.legend = T) + coord_fixed() + theme_void() + scale_y_reverse()
+dev.off()
+
+
+FeatureOverlay(se.uncolcropped, features = "predicted.id", indices = 1, pt.size = 9, pt.alpha = 0.5)
+
+
+
+```
+
+```{r tmuris crop}
+
+se.muris <- ManualAnnotation(se.muris)
+
+FeatureOverlay(se.muris, features = "labels")
+
+crop.geoms <- GetCropWindows(se.muris, groups.to.keep = "crop2")
+
+im1 <- magick::image_read(GetStaffli(se.muris)@imgs[1]) %>% imager::magick2cimg()
+
+corners <- apply(do.call(rbind, sapply(crop.geoms, function(x) {
+  strsplit(x[1], "x|\\+")
+})), 2, as.numeric)
+plot(im1) +
+rect(xleft = corners[3], ybottom = corners[4], xright = corners[3] + corners[1], ytop = corners[4] + corners[2])
+
+se.muriscropped <- CropImages(se.muris, crop.geometry.list = list("1" = "300x140+480+1260"), xdim = 500, time.resolve = FALSE, verbose = TRUE)
+
+msk.fkn <- function(im) {
+  suppressWarnings({
+    im <- imager::grayscale(im)
+    im <- imager::isoblur(im, 3)
+    out <- imager::threshold(im)
+    out <- !out
+    out <- imager::fill(out, 5)
+    out <- EBImage::as.Image(out)
+    out <- EBImage::fillHull(out)
+    out <- imager::as.pixset(out)
+  })
+  return(out)
+}
+
+se.masked1 <- MaskImages(se.muriscropped, custom.msk.fkn = msk.fkn, verbose = TRUE)
+
+ImagePlot(se.masked1, ncols = 1, method = "raster", annotate = F) 
+
+cropmuris <- SubsetSTData(haber.transfer, expression = treatment %in% "Tmuris")
+
+se.muriscropped <- CropImages(cropmuris, crop.geometry.list = list("1" = "300x140+480+1260"), xdim = 500, time.resolve = FALSE, verbose = TRUE)
+
+se.muriscropped <- MaskImages(se.muriscropped, custom.msk.fkn = msk.fkn, verbose = TRUE)
+
+im4 <- ImagePlot(se.muriscropped, ncols = 1, method = "raster", annotate = F) 
+
+imr <- image_read(staffliobject@rasterlists$masked$`1`)
+
+im2 <- magick2cimg(GetStaffli(se.muriscropped)@rasterlists["masked"])
+
+rasterimage <- raster(staffliobject@rasterlists$masked$`1`)
+
+```
+
+```{r scatterpie cropped}
+
+score.muris.crop <- as.data.frame(haber.transfer@assays$prediction.score.id@data)
+
+score.muris.crop <- as.data.frame(t(score.muris.crop))
+
+
+barcodes.muris <- as.data.frame(se.muris@assays$RNA@counts@Dimnames[[2]])
+
+colnames(barcodes.muris)[1] <- "barcodes"
+
+staffliobject <- GetStaffli(se.muriscropped)
+
+barcodes.muris$x <- staffliobject@meta.data$x
+barcodes.muris$y <- staffliobject@meta.data$y
+barcodes.muris <- column_to_rownames(barcodes.muris, "barcodes")
+
+
+muris.score <- cbind(barcodes.muris, score.muris.crop)
+
+
+
+png("Tmurisscatterpiecrop.png", width = 800, height = 700)
+ggplot() + geom_scatterpie(aes(x = x, y = y), data = muris.score, pie_scale = 1.2, cols = habercells) + coord_fixed() + theme_void() + scale_y_reverse() +  annotation_custom(rasterGrob(imr, 
+                               width = unit(1,"npc"),
+                               height = unit(1,"npc")), 
+                    -Inf, Inf, -Inf, Inf) 
+dev.off()
+
+
+png("Tmurisscatterpiecrop2.png", width = 300, height = 140, bg = "transparent")
+ggplot() + geom_scatterpie(aes(x = x, y = y), data = muris.score, pie_scale = 1.2, cols = habercells) + coord_fixed() + theme_void() + scale_y_reverse()
+dev.off()
+
+
+
+myplot <- image_ggplot(imr)
+
+
+image1 <- image_fill(imr, 'none')
+raster <- as.raster(image)
+l + annotation_raster(raster, 26, 53, 51, 58) 
+l + grid.raster(image)
+
+
+plot(26:58, type='n', main="", xlab="x", ylab="y")
+ 
+# Get the plot information so the image will fill the plot box, and draw it
+lim <- par()
+rasterImage(imr, 
+            xleft=26, xright=53, 
+            ybottom=51, ytop=58)
+grid()
+ 
+#Add your plot !
+lines(
+  x=c(1, 1.2, 1.4, 1.6, 1.8, 2.0), 
+  y=c(1, 1.3, 1.7, 1.6, 1.7, 1.0), 
+  type="b", lwd=5, col="black")
+
+
+
+FeatureOverlay(se.muriscropped, features = "predicted.id", indices = 1, pt.size = 9, pt.alpha = 0.5)
+
+
+
+```
+
+
+
+```{r haber}
+
+DimPlot(haber.transfer, reduction = "umap.harmony")
+
+Idents(haber.transfer) <- "predicted.id"
+Idents(haber.transfer) <- "seurat_clusters"
+
+haber.transfer <- RunUMAP(haber.transfer, reduction = "umap.harmony", dims = 1:10, reduction.name = "umap.harmony", n.epochs = 1e3)
+haber.transfer <- FindNeighbors(haber.transfer, reduction = "harmony", dims = 1:20, force.recalc = T) 
+haber.transfer <- FindClusters(haber.transfer, graph.name = "SCT_snn", resolution = 0.5)
+
+DimPlot(haber.transfer, reduction = "pca", label = T)
+
+```
+
+```{r celltrek}
+
+
+se_uncol_traint <- CellTrek::traint(st_data=se.uncol, sc_data=haber, sc_assay='RNA', cell_names='clusters')
+
+uncolstaffli <- GetStaffli(se.uncol)
+se.uncol@images <- uncolstaffli
+
+
+
+```
